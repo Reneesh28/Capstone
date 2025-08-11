@@ -5,7 +5,8 @@ from typing import List, Dict, TypedDict
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import FAISS
+# Remove FAISS import and add Chroma instead
+from langchain.vectorstores import Chroma
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -14,10 +15,11 @@ from langchain_groq import ChatGroq
 # --- Vector DB Functions (Model loading is no longer needed here) ---
 
 def create_vector_db(_chunks: List[Document]):
-    """Creates a new FAISS vector store from document chunks."""
+    """Creates a new Chroma vector store from document chunks."""
     embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
     embeddings = HuggingFaceEmbeddings(model_name=embedding_model_name)
-    return FAISS.from_documents(_chunks, embeddings)
+    # Initialize Chroma vectorstore
+    return Chroma.from_documents(_chunks, embeddings)
 
 # --- Standard PDF Processing ---
 
@@ -43,9 +45,10 @@ class GraphState(TypedDict):
     chat_history: List[Dict]
     response: str
 
-def retrieve_context_node(state: GraphState, vector_db: FAISS) -> Dict:
+def retrieve_context_node(state: GraphState, vector_db: Chroma) -> Dict:
     """Node that retrieves relevant documents from the vector store."""
     question = state["question"]
+    # Chroma uses similarity_search by default
     docs = vector_db.similarity_search(question, k=4)
     context = "\n\n".join([doc.page_content for doc in docs])
     return {"context": context}
@@ -75,7 +78,7 @@ def generate_response_node(state: GraphState) -> Dict:
     # The response object has a 'content' attribute
     return {"response": response.content}
 
-def create_conversational_rag_chain(vector_db: FAISS):
+def create_conversational_rag_chain(vector_db: Chroma):
     """Creates and compiles the LangGraph for the API-based RAG chain."""
     workflow = StateGraph(GraphState)
     
