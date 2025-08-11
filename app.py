@@ -1,72 +1,83 @@
 import streamlit as st
+from dotenv import load_dotenv
+from utils import (
+    load_pdf,
+    split_text,
+    create_vector_db,
+    create_conversational_rag_chain,
+)
 import os
-import subprocess
-import sys
 
-st.title("FitTrack AI - Phase 1 Setup Checker")
+# Load environment variables from the .env file
+load_dotenv()
 
-# Check Python version
-python_version = sys.version.split()[0]
-st.write(f"**Python version:** {python_version}")
+st.set_page_config(page_title="Fitness Assistant AI", layout="wide")
+st.title("Fitness Assistant AI (Powered by Groq Llama 3)")
 
-if python_version < "3.11":
-    st.error("Python 3.11 or higher is recommended.")
 
-# Check if .venv is active (heuristic)
-if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
-    st.success("Virtual environment is activated.")
-else:
-    st.warning("Virtual environment might NOT be activated.")
+# --- THIS IS THE FIX: Initialize session state at the top ---
+if "rag_chain" not in st.session_state:
+    st.session_state.rag_chain = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "vector_db" not in st.session_state:
+    st.session_state.vector_db = None
+# --- END OF FIX ---
 
-# Check required packages
-required_packages = ["streamlit", "langchain", "chromadb", "faiss-cpu", "openai", "requests"]
-st.subheader("Required Python packages")
 
-missing_packages = []
-for pkg in required_packages:
-    try:
-        __import__(pkg)
-        st.write(f"✔️ {pkg} is installed")
-    except ImportError:
-        missing_packages.append(pkg)
-        st.error(f"❌ {pkg} is NOT installed")
+# Check if the Groq API key is available in the environment
+api_key_is_set = os.environ.get("GROQ_API_KEY") is not None
 
-if missing_packages:
-    st.warning("Run `pip install -r requirements.txt` to install missing packages.")
-
-# Check folder structure
-st.subheader("Project folders check")
-required_folders = ["app", "services", "utils", "assets"]
-
-for folder in required_folders:
-    if os.path.isdir(folder):
-        st.write(f"✔️ Folder `{folder}` exists")
+# --- Sidebar ---
+with st.sidebar:
+    st.header("Setup")
+    
+    # Display a status message about the API key
+    if api_key_is_set:
+        st.success("Groq API Key loaded successfully from .env file.")
     else:
-        st.error(f"❌ Folder `{folder}` is MISSING")
+        st.error("Groq API Key not found. Please create a .env file.")
 
-# Check sample PDFs in assets
-st.subheader("Sample PDFs in assets/")
-assets_path = "assets"
-pdf_files = []
-if os.path.isdir(assets_path):
-    pdf_files = [f for f in os.listdir(assets_path) if f.lower().endswith(".pdf")]
-    if pdf_files:
-        st.write(f"✔️ Found sample PDFs: {', '.join(pdf_files)}")
-    else:
-        st.warning("No PDF files found in assets/. Add sample PDFs for testing.")
+    uploaded_file = st.file_uploader("Upload your fitness or medical PDF", type=["pdf"])
+
+    # The button is disabled if the API key is not set
+    if st.button("Process Document", disabled=not api_key_is_set) and uploaded_file is not None:
+        with st.spinner("Processing PDF..."):
+            docs = load_pdf(uploaded_file)
+            chunks = split_text(docs)
+            st.session_state.vector_db = create_vector_db(chunks)
+            st.session_state.rag_chain = create_conversational_rag_chain(st.session_state.vector_db)
+            # Reset chat history for the new document
+            st.session_state.chat_history = []
+            st.success("Setup complete! You can now start chatting.")
+
+# --- Main Chat Interface ---
+st.header("Chat with your AI Fitness Assistant")
+
+# This loop will now safely run on an empty list on the first load
+for message in st.session_state.chat_history:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Only show the chat input if the RAG chain has been created
+if st.session_state.rag_chain:
+    if prompt := st.chat_input("Ask a question about your fitness document"):
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        with st.spinner("The AI is thinking..."):
+            graph_input = {"question": prompt, "chat_history": st.session_state.chat_history}
+            final_state = st.session_state.rag_chain.invoke(graph_input)
+            response = final_state["response"]
+            
+            with st.chat_message("assistant"):
+                st.markdown(response)
+            
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
 else:
-    st.error("assets/ folder is missing.")
-
-# GitLab repo check (check remote URL)
-st.subheader("GitLab repository remote URL")
-try:
-    remote_url = subprocess.check_output(["git", "remote", "get-url", "origin"]).decode().strip()
-    st.write(f"✔️ Git remote origin URL: {remote_url}")
-    if "gitlab.com" not in remote_url:
-        st.warning("Remote URL does not appear to be a GitLab repository.")
-except Exception as e:
-    st.error(f"❌ Could not get Git remote URL: {e}")
-
-st.markdown("---")
-st.info("If any checks fail, fix them before moving to Phase 2.")
-
+    # Guide the user on what to do next
+    if not api_key_is_set:
+         st.warning("Please set up your Groq API key in a .env file to begin.")
+    else:
+        st.warning("Please upload a document and click 'Process Document' in the sidebar to activate the chat.")    

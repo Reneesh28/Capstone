@@ -1,16 +1,17 @@
+# --- Core Application Framework ---
 streamlit==1.38.0
 python-dotenv==1.0.1
+
+# --- PDF and Text Processing ---
 pypdf==4.2.0
 
+# --- LangChain, LangGraph, and Vector Store Components ---
 langchain==0.2.11
 langchain-community==0.2.10
 langgraph==0.0.63
-
-huggingface-hub==0.24.5
 langchain-huggingface==0.0.3
-transformers==4.44.2
-sentence-transformers==3.0.1
-
-chromadb==0.5.3
+sentence-transformers>=2.6.0
 faiss-cpu==1.8.0
-torch==2.8.0
+
+# --- API-Specific Library ---
+langchain-groq==0.1.6
