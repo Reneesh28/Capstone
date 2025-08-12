@@ -1,11 +1,23 @@
 streamlit==1.38.0
 pypdf==4.2.0
+
+# LangChain core + addons
 langchain==0.2.11
 langchain-community==0.2.10
 langgraph==0.0.63
 langchain-huggingface==0.0.3
-sentence-transformers>=2.6.0
-faiss-cpu==1.8.0
 langchain-groq==0.1.6
+
+# Embeddings and model infra
+sentence-transformers>=2.6.0
 transformers>=4.40.0
 torch>=2.2.0
+
+# Vector DB (pure-Python, no C++ build)
+lancedb>=0.6.0
+
+# Optional utilities (kept minimal)
+markdown-it-py==4.0.0
+mdurl==0.1.2
+pygments==2.19.2
+rich==14.1.0
