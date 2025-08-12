@@ -15,9 +15,3 @@ torch>=2.2.0
 
 # Vector DB (pure-Python, no C++ build)
 lancedb>=0.6.0
-
-# Optional utilities (kept minimal)
-markdown-it-py==4.0.0
-mdurl==0.1.2
-pygments==2.19.2
-rich==14.1.0
