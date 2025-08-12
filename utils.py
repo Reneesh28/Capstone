@@ -5,21 +5,45 @@ from typing import List, Dict, TypedDict
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-# Remove FAISS import and add Chroma instead
-from langchain.vectorstores import Chroma
+# Import the base chromadb library
+import chromadb
+# Chroma is already imported from langchain_community
+from langchain_community.vectorstores import Chroma
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 
-# --- Vector DB Functions (Model loading is no longer needed here) ---
+# --- Vector DB Functions (Updated for Persistence) ---
 
 def create_vector_db(_chunks: List[Document]):
-    """Creates a new Chroma vector store from document chunks."""
+    """
+    Creates or loads a persistent Chroma vector store from document chunks.
+    """
     embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
     embeddings = HuggingFaceEmbeddings(model_name=embedding_model_name)
-    # Initialize Chroma vectorstore
-    return Chroma.from_documents(_chunks, embeddings)
+    
+    # Define a persistent directory to store the database
+    persist_directory = "chroma_db"
+
+    # Create a persistent Chroma client
+    # This will create the directory if it doesn't exist
+    client = chromadb.PersistentClient(path=persist_directory)
+
+    # Create or load the vector store from the persistent directory
+    vector_db = Chroma(
+        collection_name="fitness_documents",
+        embedding_function=embeddings,
+        persist_directory=persist_directory,
+        client=client
+    )
+
+    # Add the new documents to the existing collection.
+    # Chroma handles deduplication based on document content and metadata.
+    vector_db.add_documents(_chunks)
+    
+    # The Chroma instance is now connected to the persistent database
+    return vector_db
 
 # --- Standard PDF Processing ---
 
@@ -29,7 +53,10 @@ def load_pdf(file) -> List[Document]:
         tmp.write(file.getvalue())
         tmp_path = tmp.name
     loader = PyPDFLoader(tmp_path)
-    return loader.load()
+    # Clean up the temporary file after loading
+    documents = loader.load()
+    os.remove(tmp_path)
+    return documents
 
 def split_text(docs: List[Document]) -> List[Document]:
     """Splits loaded documents into smaller chunks for the vector store."""
@@ -59,7 +86,7 @@ def generate_response_node(state: GraphState) -> Dict:
     context = state["context"]
     chat_history = state["chat_history"]
 
-    # Initialize the Groq Chat client with the Llama 3 8B model
+    # Initialize the Groq Chat client with the Llama 3 70B model
     llm = ChatGroq(model_name="llama3-70b-8192")
 
     system_prompt = (
@@ -82,6 +109,7 @@ def create_conversational_rag_chain(vector_db: Chroma):
     """Creates and compiles the LangGraph for the API-based RAG chain."""
     workflow = StateGraph(GraphState)
     
+    # The lambda function now correctly passes the vector_db to the node
     workflow.add_node("retrieve_context", lambda state: retrieve_context_node(state, vector_db))
     workflow.add_node("generate_response", generate_response_node)
     
