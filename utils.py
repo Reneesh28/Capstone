@@ -1,3 +1,4 @@
+# utils.py
 import os
 import tempfile
 from typing import List, Dict, TypedDict
@@ -5,116 +6,165 @@ from typing import List, Dict, TypedDict
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-# Import the base chromadb library
-import chromadb
-# Chroma is already imported from langchain_community
-from langchain_community.vectorstores import Chroma
-from langchain_core.output_parsers import StrOutputParser
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import LanceDB
+import lancedb
+
 from langgraph.graph import END, StateGraph
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 
-# --- Vector DB Functions (Updated for Persistence) ---
-
-def create_vector_db(_chunks: List[Document]):
+# -------------------------
+# PDF loader
+# -------------------------
+def load_pdf(uploaded_file) -> List[Document]:
     """
-    Creates or loads a persistent Chroma vector store from document chunks.
+    Loads a PDF from a Streamlit UploadedFile and returns a list of LangChain Document objects.
     """
-    embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
-    embeddings = HuggingFaceEmbeddings(model_name=embedding_model_name)
-    
-    # Define a persistent directory to store the database
-    persist_directory = "chroma_db"
+    if uploaded_file is None:
+        return []
 
-    # Create a persistent Chroma client
-    # This will create the directory if it doesn't exist
-    client = chromadb.PersistentClient(path=persist_directory)
-
-    # Create or load the vector store from the persistent directory
-    vector_db = Chroma(
-        collection_name="fitness_documents",
-        embedding_function=embeddings,
-        persist_directory=persist_directory,
-        client=client
-    )
-
-    # Add the new documents to the existing collection.
-    # Chroma handles deduplication based on document content and metadata.
-    vector_db.add_documents(_chunks)
-    
-    # The Chroma instance is now connected to the persistent database
-    return vector_db
-
-# --- Standard PDF Processing ---
-
-def load_pdf(file) -> List[Document]:
-    """Loads a PDF from a Streamlit UploadedFile object."""
+    # Write to temp file because PyPDFLoader expects a path
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(file.getvalue())
+        tmp.write(uploaded_file.getvalue())
         tmp_path = tmp.name
-    loader = PyPDFLoader(tmp_path)
-    # Clean up the temporary file after loading
-    documents = loader.load()
-    os.remove(tmp_path)
+
+    try:
+        loader = PyPDFLoader(tmp_path)
+        documents = loader.load()
+    finally:
+        # remove the temp file
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
     return documents
 
-def split_text(docs: List[Document]) -> List[Document]:
-    """Splits loaded documents into smaller chunks for the vector store."""
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+
+# -------------------------
+# Text splitter
+# -------------------------
+def split_text(docs: List[Document], chunk_size: int = 1000, chunk_overlap: int = 200) -> List[Document]:
+    """
+    Splits a list of LangChain Document objects into smaller chunks suitable for embedding.
+    """
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     return splitter.split_documents(docs)
 
-# --- LangGraph Implementation using Groq API ---
 
+# -------------------------
+# Create LanceDB vector DB
+# -------------------------
+def create_vector_db(docs: List[Document], embeddings_model_name: str = "sentence-transformers/all-MiniLM-L6-v2", table_name: str = "fitness_capstone"):
+    """
+    Create (or open) a LanceDB-backed LangChain vectorstore from documents.
+    Returns a LangChain-compatible vectorstore instance (LanceDB).
+    """
+    if not docs:
+        raise ValueError("No documents provided to create_vector_db.")
+
+    # 1) Embeddings (we use sentence-transformers / HuggingFace here)
+    embeddings = HuggingFaceEmbeddings(model_name=embeddings_model_name)
+
+    # 2) Prepare LanceDB connection path (ephemeral on Streamlit Cloud - consider persistent storage for production)
+    lance_path = os.environ.get("LANCEDB_PATH", "/tmp/lancedb")
+    os.makedirs(lance_path, exist_ok=True)
+
+    # 3) Connect to LanceDB and use LangChain community LanceDB wrapper
+    conn = lancedb.connect(lance_path)
+
+    # 4) Build / store embeddings in LanceDB (from_documents returns a LanceDB vectorstore instance)
+    db = LanceDB.from_documents(docs, embeddings, connection=conn, table_name=table_name)
+
+    return db
+
+
+# -------------------------
+# LangGraph + Groq LLM RAG chain
+# -------------------------
 class GraphState(TypedDict):
-    """Represents the state of our graph."""
     question: str
     context: str
     chat_history: List[Dict]
     response: str
 
-def retrieve_context_node(state: GraphState, vector_db: Chroma) -> Dict:
-    """Node that retrieves relevant documents from the vector store."""
-    question = state["question"]
-    # Chroma uses similarity_search by default
+
+def retrieve_context_node(state: GraphState, vector_db) -> Dict:
+    """
+    Node that retrieves relevant passages from the vectorstore.
+    `vector_db` is expected to be a LangChain vectorstore (LanceDB).
+    Returns dict with 'context' string.
+    """
+    question = state.get("question", "")
+    # Many LangChain vectorstores expose similarity_search; LanceDB wrapper supports .similarity_search
     docs = vector_db.similarity_search(question, k=4)
-    context = "\n\n".join([doc.page_content for doc in docs])
+    context = "\n\n".join([getattr(d, "page_content", "") for d in docs])
     return {"context": context}
 
+
 def generate_response_node(state: GraphState) -> Dict:
-    """Node that generates a response using the Groq API."""
-    question = state["question"]
-    context = state["context"]
-    chat_history = state["chat_history"]
+    """
+    Node that calls Groq Chat LLM to generate an answer given question + context.
+    Expects environment variable GROQ_API_KEY to be set (app sets it from Streamlit secrets).
+    """
+    question = state.get("question", "")
+    context = state.get("context", "")
+    chat_history = state.get("chat_history", [])
 
-    # Initialize the Groq Chat client with the Llama 3 70B model
-    llm = ChatGroq(model_name="llama3-70b-8192")
+    # Instantiate the Groq Chat LLM (uses your Groq API key from env)
+    # Adjust model id if you prefer a different Groq model (e.g., "llama3-8b-8192" etc.)
+    llm = ChatGroq(model_name=os.environ.get("GROQ_MODEL", "llama3-70b-8192"))
 
+    # Build conversation messages
     system_prompt = (
-        "You are a friendly and encouraging Fitness Assistant. Your goal is to provide detailed, "
-        "accurate, and supportive answers based ONLY on the context provided. "
-        "If the answer is not in the context, politely state that you cannot provide an answer based on the document."
+        "You are a friendly and encouraging Fitness Assistant. Provide accurate answers based ONLY on the provided context. "
+        "If the answer is not in the context, say you cannot answer based on the document."
     )
-    
+
     messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(chat_history)
-    messages.append({"role": "user", "content": f"Context:\n{context}\n\nQuestion:\n{question}"})
 
-    # The LangChain client handles the API call
-    response = llm.invoke(messages)
-    
-    # The response object has a 'content' attribute
-    return {"response": response.content}
+    # Append prior chat_history items (they should be list of {"role": "...", "content": "..."})
+    if chat_history:
+        messages.extend(chat_history)
 
-def create_conversational_rag_chain(vector_db: Chroma):
-    """Creates and compiles the LangGraph for the API-based RAG chain."""
+    # Append user message containing question + context
+    user_content = f"Context:\n{context}\n\nQuestion:\n{question}"
+    messages.append({"role": "user", "content": user_content})
+
+    # Call Groq LLM. ChatGroq returns a response-like object; the exact return shape may vary by version.
+    # We use .invoke(...) pattern if available, otherwise call the object directly.
+    try:
+        # prefer invoke if available (your environment earlier used .invoke)
+        llm_response = llm.invoke(messages)
+        text = getattr(llm_response, "content", None) or getattr(llm_response, "text", None) or str(llm_response)
+    except Exception:
+        # fallback to direct call
+        llm_response = llm(messages)  # many LangChain LLMs support __call__
+        # __call__ commonly returns a string
+        if isinstance(llm_response, str):
+            text = llm_response
+        else:
+            text = getattr(llm_response, "content", None) or str(llm_response)
+
+    return {"response": text}
+
+
+def create_conversational_rag_chain(vector_db):
+    """
+    Creates a LangGraph StateGraph with two nodes:
+      1) retrieve_context (vector search)
+      2) generate_response (Groq LLM)
+    Returns the compiled workflow (callable with .invoke(payload_dict))
+    """
     workflow = StateGraph(GraphState)
-    
-    # The lambda function now correctly passes the vector_db to the node
+
+    # Add nodes. retrieve_context needs the vector_db so we pass it via lambda
     workflow.add_node("retrieve_context", lambda state: retrieve_context_node(state, vector_db))
     workflow.add_node("generate_response", generate_response_node)
-    
+
     workflow.set_entry_point("retrieve_context")
     workflow.add_edge("retrieve_context", "generate_response")
     workflow.add_edge("generate_response", END)
-    
+
+    # compile -> returns a runnable object supporting .invoke
     return workflow.compile()
